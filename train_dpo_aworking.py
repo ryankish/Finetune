@@ -110,8 +110,8 @@ def main():
     # Set very conservative training parameters
     training_args.output_dir = os.path.join(BASE_DIR, "outputs")
     training_args.remove_unused_columns = False
-    training_args.gradient_accumulation_steps = 1
-    training_args.per_device_train_batch_size = 1
+    training_args.gradient_accumulation_steps = 16
+    training_args.per_device_train_batch_size = 2
     training_args.learning_rate = 1e-5  # Even lower learning rate
     training_args.max_grad_norm = 0.9   # Stricter gradient clipping
     training_args.logging_steps = 1

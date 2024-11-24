@@ -1,0 +1,13 @@
+{
+    "folders": [
+        {
+            "path": "/home/jwy3172/work/Finetune",
+        },
+        {
+            "path": "/data2/ryan/finetune/",
+        }
+    ],
+    "settings": {
+        "jupyter.notebookFileRoot": "${workspaceFolder}"
+    }
+}
