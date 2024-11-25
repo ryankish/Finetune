@@ -2,6 +2,7 @@ import sys
 import os
 import torch
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List
 from datasets import load_dataset, Dataset
@@ -11,20 +12,100 @@ from transformers import (
     HfArgumentParser,
 )
 from trl import DPOTrainer, DPOConfig
+from transformers import TrainerCallback
+os.environ["WANDB_DISABLED"] = "true"
+
 
 # Configure base directory and logging
-BASE_DIR = "../resource/"
-os.makedirs(BASE_DIR, exist_ok=True)
+BASE_DIR = "../resources/"
+OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
+CACHE_DIR = os.path.join(BASE_DIR, "cache")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(CACHE_DIR, exist_ok=True)
 
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
     level=logging.INFO,
     handlers=[
-        logging.FileHandler(os.path.join(BASE_DIR, "training.log")),
+        logging.FileHandler(os.path.join(OUTPUT_DIR, "training.log")),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
+
+class TimingCallback(TrainerCallback):
+    def __init__(self):
+        self.start_time = None
+        self.step_start_time = None
+        self.total_steps = 0
+        self.times = []
+
+    def on_init_end(self, args, state, control, **kwargs):
+        """Called when trainer initialization is done."""
+        return control
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        """Called when training starts."""
+        self.start_time = time.time()
+        logger.info("Starting training...")
+        return control
+
+    def on_step_begin(self, args, state, control, **kwargs):
+        """Called before each training step."""
+        self.step_start_time = time.time()
+        return control
+
+    def on_step_end(self, args, state, control, **kwargs):
+        """Called after each training step."""
+        if self.step_start_time is not None:
+            step_time = time.time() - self.step_start_time
+            self.times.append(step_time)
+            self.total_steps += 1
+            
+            # Calculate statistics
+            avg_time = sum(self.times) / len(self.times)
+            if len(self.times) > 1:
+                recent_avg = sum(self.times[-10:]) / min(10, len(self.times))
+            else:
+                recent_avg = avg_time
+                
+            logger.info(
+                f"Step {self.total_steps} - "
+                f"Time: {step_time:.2f}s - "
+                f"Average: {avg_time:.2f}s - "
+                f"Recent Average (10 steps): {recent_avg:.2f}s"
+            )
+        return control
+
+    def on_train_end(self, args, state, control, **kwargs):
+        """Called when training ends."""
+        total_time = time.time() - self.start_time
+        hours = total_time // 3600
+        minutes = (total_time % 3600) // 60
+        seconds = total_time % 60
+        
+        logger.info(
+            f"Training completed in {int(hours)}h {int(minutes)}m {seconds:.2f}s\n"
+            f"Total steps: {self.total_steps}\n"
+            f"Average time per step: {sum(self.times) / len(self.times):.2f}s"
+        )
+        return control
+
+    def on_evaluate(self, args, state, control, **kwargs):
+        """Called after evaluation."""
+        return control
+
+    def on_save(self, args, state, control, **kwargs):
+        """Called when saving the model."""
+        return control
+
+    def on_log(self, args, state, control, logs, **kwargs):
+        """Called when logging occurs."""
+        return control
+
+    def on_prediction_step(self, args, state, control, **kwargs):
+        """Called before each prediction step."""
+        return control
 
 @dataclass
 class ModelArguments:
@@ -33,7 +114,7 @@ class ModelArguments:
         metadata={"help": "Path to pretrained model or model identifier"}
     )
     model_cache_dir: Optional[str] = field(
-        default=f"{BASE_DIR}/cache",
+        default=CACHE_DIR,
         metadata={"help": "Where to store the pretrained models"}
     )
 
@@ -44,7 +125,7 @@ class DataArguments:
         metadata={"help": "The name of the dataset to use"}
     )
     dataset_cache_dir: str = field(
-        default=f"{BASE_DIR}/cache",
+        default=CACHE_DIR,
         metadata={"help": "Where to store the datasets"}
     )
 
@@ -108,15 +189,16 @@ def main():
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
     
     # Set very conservative training parameters
-    training_args.output_dir = os.path.join(BASE_DIR, "outputs")
+    training_args.output_dir = OUTPUT_DIR
     training_args.remove_unused_columns = False
     training_args.gradient_accumulation_steps = 16
-    training_args.per_device_train_batch_size = 4
+    training_args.per_device_train_batch_size = 2
     training_args.learning_rate = 1e-5  # Even lower learning rate
     training_args.max_grad_norm = 0.9   # Stricter gradient clipping
     training_args.logging_steps = 1
     training_args.num_train_epochs = 3
-    training_args.save_strategy = "epoch"
+    training_args.save_steps = 4  # Save the model every 4 steps
+    training_args.save_total_limit = 2
     training_args.fp16 = False
     training_args.warmup_ratio = 0.1
     training_args.gradient_checkpointing = True
@@ -156,16 +238,14 @@ def main():
     
     # Prepare train dataset
     train_dataset = prepare_dataset(raw_dataset["train"])
-    example = raw_dataset["train"][0]
-    # print(example)
-    # sys.exit()
     
     # Prepare eval dataset if it exists
     eval_dataset = None
     if "validation" in raw_dataset:
         eval_dataset = prepare_dataset(raw_dataset["validation"])
 
-    # Initialize DPO Trainer
+    # Initialize DPO Trainer with timing callback
+    timing_callback = TimingCallback()
     dpo_trainer = DPOTrainer(
         model=model,
         args=training_args,
@@ -178,13 +258,15 @@ def main():
         max_target_length=256,
         loss_type="sigmoid",
         precompute_ref_log_probs=False,
+        callbacks=[timing_callback],  # Add the timing callback
     )
 
     # Train the model
     train_result = dpo_trainer.train()
     
     # Save everything
-    final_model_path = os.path.join(BASE_DIR, "models", "final_model")
+    final_model_path = os.path.join(OUTPUT_DIR, "models", "final_model")
+    os.makedirs(final_model_path, exist_ok=True)
     dpo_trainer.save_model(final_model_path)
     dpo_trainer.save_metrics("train", train_result.metrics)
     dpo_trainer.save_state()

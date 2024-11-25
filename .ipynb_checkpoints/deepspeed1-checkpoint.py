@@ -2,6 +2,7 @@ import sys
 import os
 import torch
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List
 from datasets import load_dataset, Dataset
@@ -11,20 +12,23 @@ from transformers import (
     HfArgumentParser,
 )
 from trl import DPOTrainer, DPOConfig
+from transformers import TrainerCallback
+
+os.environ["WANDB_DISABLED"] = "true"
+
 
 # Configure base directory and logging
-BASE_DIR = "../resource/"
-os.makedirs(BASE_DIR, exist_ok=True)
+BASE_DIR = "../resources/"
 
-logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
-    handlers=[
-        logging.FileHandler(os.path.join(BASE_DIR, "training.log")),
-        logging.StreamHandler()
-    ]
-)
+# Set up global logger
 logger = logging.getLogger(__name__)
+
+# Function to set up directories dynamically
+def setup_experiment_directory(experiment_name):
+    experiment_dir = os.path.join(BASE_DIR, "outputs", experiment_name)
+    os.makedirs(experiment_dir, exist_ok=True)
+    return experiment_dir
+
 
 @dataclass
 class ModelArguments:
@@ -33,9 +37,10 @@ class ModelArguments:
         metadata={"help": "Path to pretrained model or model identifier"}
     )
     model_cache_dir: Optional[str] = field(
-        default=f"{BASE_DIR}/cache",
+        default=os.path.join(BASE_DIR, "cache"),
         metadata={"help": "Where to store the pretrained models"}
     )
+
 
 @dataclass
 class DataArguments:
@@ -44,9 +49,97 @@ class DataArguments:
         metadata={"help": "The name of the dataset to use"}
     )
     dataset_cache_dir: str = field(
-        default=f"{BASE_DIR}/cache",
+        default=os.path.join(BASE_DIR, "cache"),
         metadata={"help": "Where to store the datasets"}
     )
+
+
+@dataclass
+class TrainingArguments(DPOConfig):
+    experiment_name: str = field(
+        default="default_experiment",
+        metadata={"help": "Name of the experiment. Used for organizing outputs."}
+    )
+    output_dir: Optional[str] = field(
+        default=None,
+        metadata={"help": "The directory where all outputs will be stored."}
+    )
+
+
+class TimingCallback(TrainerCallback):
+    def __init__(self):
+        self.start_time = None
+        self.step_start_time = None
+        self.total_steps = 0
+        self.times = []
+
+    def on_init_end(self, args, state, control, **kwargs):
+        """Called when trainer initialization is done."""
+        return control
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        """Called when training starts."""
+        self.start_time = time.time()
+        logger.info("Starting training...")
+        return control
+
+    def on_step_begin(self, args, state, control, **kwargs):
+        """Called before each training step."""
+        self.step_start_time = time.time()
+        return control
+
+    def on_step_end(self, args, state, control, **kwargs):
+        """Called after each training step."""
+        if self.step_start_time is not None:
+            step_time = time.time() - self.step_start_time
+            self.times.append(step_time)
+            self.total_steps += 1
+            
+            # Calculate statistics
+            avg_time = sum(self.times) / len(self.times)
+            if len(self.times) > 1:
+                recent_avg = sum(self.times[-10:]) / min(10, len(self.times))
+            else:
+                recent_avg = avg_time
+                
+            logger.info(
+                f"Step {self.total_steps} - "
+                f"Time: {step_time:.2f}s - "
+                f"Average: {avg_time:.2f}s - "
+                f"Recent Average (10 steps): {recent_avg:.2f}s"
+            )
+        return control
+
+    def on_train_end(self, args, state, control, **kwargs):
+        """Called when training ends."""
+        total_time = time.time() - self.start_time
+        hours = total_time // 3600
+        minutes = (total_time % 3600) // 60
+        seconds = total_time % 60
+        
+        logger.info(
+            f"Training completed in {int(hours)}h {int(minutes)}m {seconds:.2f}s\n"
+            f"Total steps: {self.total_steps}\n"
+            f"Average time per step: {sum(self.times) / len(self.times):.2f}s"
+        )
+        return control
+
+    def on_evaluate(self, args, state, control, **kwargs):
+        """Called after evaluation."""
+        return control
+
+    def on_save(self, args, state, control, **kwargs):
+        """Called when saving the model."""
+        return control
+
+    def on_log(self, args, state, control, logs, **kwargs):
+        """Called when logging occurs."""
+        return control
+
+    def on_prediction_step(self, args, state, control, **kwargs):
+        """Called before each prediction step."""
+        return control
+
 
 def validate_and_format_example(example: Dict) -> Dict:
     """Validate and format a single example for DPO training."""
@@ -104,27 +197,23 @@ def prepare_dataset(dataset: Dataset) -> Dataset:
 
 def main():
     # Parse arguments
-    parser = HfArgumentParser((ModelArguments, DataArguments, DPOConfig))
+    parser = HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-    
-    # Set very conservative training parameters
-    training_args.output_dir = os.path.join(BASE_DIR, "outputs")
-    training_args.remove_unused_columns = False
-    training_args.gradient_accumulation_steps = 16
-    training_args.per_device_train_batch_size = 4
-    training_args.learning_rate = 1e-5  # Even lower learning rate
-    training_args.max_grad_norm = 0.9   # Stricter gradient clipping
-    training_args.logging_steps = 1
-    training_args.num_train_epochs = 3
-    training_args.save_strategy = "epoch"
-    training_args.fp16 = False
-    training_args.warmup_ratio = 0.1
-    training_args.gradient_checkpointing = True
-    training_args.beta = 0.1
-    training_args.adam_beta1 = 0.9
-    training_args.adam_beta2 = 0.999
-    training_args.adam_epsilon = 1e-8
-    training_args.weight_decay = 0.01
+
+    # Set up experiment directory
+    training_args.output_dir = setup_experiment_directory(training_args.experiment_name)
+
+    # Set up logging after defining output_dir
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        level=logging.INFO,
+        handlers=[
+            logging.FileHandler(os.path.join(training_args.output_dir, "training.log")),
+            logging.StreamHandler()
+        ]
+    )
+    global logger  # Access global logger
+    logger.info(f"Experiment Directory: {training_args.output_dir}")
 
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(
@@ -148,24 +237,20 @@ def main():
         data_args.dataset_name,
         cache_dir=data_args.dataset_cache_dir
     )
-    for example in raw_dataset["train"]:
-        try:
-            validate_and_format_example(example)
-        except Exception as e:
-            logger.error(f"Dataset issue with example {example}: {str(e)}")
-    
-    # Prepare train dataset
     train_dataset = prepare_dataset(raw_dataset["train"])
-    example = raw_dataset["train"][0]
-    # print(example)
-    # sys.exit()
-    
-    # Prepare eval dataset if it exists
     eval_dataset = None
     if "validation" in raw_dataset:
         eval_dataset = prepare_dataset(raw_dataset["validation"])
 
-    # Initialize DPO Trainer
+
+
+    # ARGUEMENTS
+    training_args.remove_unused_columns = False
+    training_args.deepspeed = "ds1.json"
+    
+    
+    # Initialize DPO Trainer with timing callback
+    timing_callback = TimingCallback()
     dpo_trainer = DPOTrainer(
         model=model,
         args=training_args,
@@ -178,18 +263,21 @@ def main():
         max_target_length=256,
         loss_type="sigmoid",
         precompute_ref_log_probs=False,
+        callbacks=[timing_callback],
     )
 
     # Train the model
     train_result = dpo_trainer.train()
-    
+
     # Save everything
-    final_model_path = os.path.join(BASE_DIR, "models", "final_model")
+    final_model_path = os.path.join(training_args.output_dir, "models", "final_model")
+    os.makedirs(final_model_path, exist_ok=True)
     dpo_trainer.save_model(final_model_path)
     dpo_trainer.save_metrics("train", train_result.metrics)
     dpo_trainer.save_state()
 
     logger.info(f"Training completed. Model saved to {final_model_path}")
+
 
 if __name__ == "__main__":
     main()
