@@ -297,16 +297,12 @@ def main():
     training_args.num_train_epochs = 1
 
     # DEEPSPEED OVERWRITES
-    training_args.learning_rate=1e-06
+    training_args.learning_rate=1e-04
     training_args.per_device_train_batch_size = 1
     training_args.gradient_accumulation_steps = 16
     # training_args.train_batch_size = 8
-    training_args.max_grad_norm = 0.7
+    training_args.max_grad_norm = 1.0
     training_args.weight_decay=0.01
-
-
-
-
     
     # Initialize DPO Trainer with timing callback
     timing_callback = TimingCallback()
