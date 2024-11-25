@@ -44,8 +44,8 @@ class ModelArguments:
 @dataclass
 class DataArguments:
     dataset_name: str = field(
-        # default="Orion-zhen/dpo-codealpaca-emoji",
-        default="eborgnia/anthropic-hh-dpo"
+        default="Orion-zhen/dpo-codealpaca-emoji",
+        # default="eborgnia/anthropic-hh-dpo"
         metadata={"help": "The name of the dataset to use"}
     )
     dataset_cache_dir: str = field(
@@ -255,7 +255,6 @@ def main():
     training_args.max_prompt_length = 228 # 97% of data prompts leq this
     training_args.max_completion_length = 1024 - 228
     training_args.max_length = 1024 # GPT2 max length
-
     
     
     # Initialize DPO Trainer with timing callback

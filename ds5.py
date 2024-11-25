@@ -14,6 +14,8 @@ from transformers import (
 from trl import DPOTrainer, DPOConfig
 from transformers import TrainerCallback
 torch.cuda.empty_cache()
+os.environ["DEEPSPEED_LOG_LEVEL"] = "info"
+os.environ["DEEPSPEED_LOG_LEVEL_STDOUT"] = "info"
 
 # Configure base directory and logging
 BASE_DIR = "../resources/"
@@ -31,8 +33,7 @@ def setup_experiment_directory(experiment_name):
 @dataclass
 class ModelArguments:
     model_name_or_path: str = field(
-        default="openai-community/gpt2",
-        # default="EleutherAI/pythia-410m-capitals-first-ft",
+        default="meta-llama/Llama-3.2-1B-Instruct",
         metadata={"help": "Path to pretrained model or model identifier"}
     )
     model_cache_dir: Optional[str] = field(
@@ -45,7 +46,7 @@ class ModelArguments:
 class DataArguments:
     dataset_name: str = field(
         # default="Orion-zhen/dpo-codealpaca-emoji",
-        default="eborgnia/anthropic-hh-dpo"
+        default="eborgnia/anthropic-hh-dpo",
         metadata={"help": "The name of the dataset to use"}
     )
     dataset_cache_dir: str = field(
@@ -101,12 +102,12 @@ class TimingCallback(TrainerCallback):
             else:
                 recent_avg = avg_time
                 
-            logger.info(
-                f"Step {self.total_steps} - "
-                f"Time: {step_time:.2f}s - "
-                f"Average: {avg_time:.2f}s - "
-                f"Recent Average (10 steps): {recent_avg:.2f}s"
-            )
+            # logger.info(
+            #     f"Step {self.total_steps} - "
+            #     f"Time: {step_time:.2f}s - "
+            #     f"Average: {avg_time:.2f}s - "
+            #     f"Recent Average (10 steps): {recent_avg:.2f}s"
+            # )
         return control
 
     def on_train_end(self, args, state, control, **kwargs):
@@ -159,31 +160,39 @@ def validate_and_format_example(example: Dict) -> Dict:
     # Format the example
     formatted = {
         "prompt": example["prompt"].strip(),
-        "chosen": example["chosen"].strip(),
-        "rejected": example["rejected"].strip()
+        "chosen": example["rejected"].strip(),
+        "rejected": example["chosen"].strip()
     }
     
     logger.debug(f"Formatted example: {formatted}")
     return formatted
 
-def prepare_dataset(dataset: Dataset) -> Dataset:
-    """Prepare the dataset for DPO training."""
+def prepare_dataset(dataset: Dataset, sample_percentage: float = 0.005) -> Dataset:
+    """Prepare the dataset for DPO training with optional sampling."""
     # Print dataset info
     logger.info(f"Original dataset features: {dataset.features}")
     logger.info(f"Original dataset size: {len(dataset)}")
     logger.info("First example before formatting:")
     logger.info(dataset[0])
-    
+
     try:
+        # Sample a fraction of the dataset
+        sample_size = int(len(dataset) * sample_percentage)
+        # sampled_indices = random.sample(range(len(dataset)), sample_size)
+        sampled_indices = range(sample_size)
+        sampled_dataset = dataset.select(sampled_indices)
+
+        logger.info(f"Sampled dataset size: {len(sampled_dataset)}")
+        
         # Try to format the first example to catch any issues early
-        first_formatted = validate_and_format_example(dataset[0])
+        first_formatted = validate_and_format_example(sampled_dataset[0])
         logger.info("First example after formatting:")
         logger.info(first_formatted)
-        
+
         # Format all examples
-        formatted_dataset = dataset.map(
+        formatted_dataset = sampled_dataset.map(
             validate_and_format_example,
-            remove_columns=dataset.column_names,
+            remove_columns=sampled_dataset.column_names,
             desc="Formatting dataset"
         )
         
@@ -191,10 +200,26 @@ def prepare_dataset(dataset: Dataset) -> Dataset:
         logger.info(f"Formatted dataset features: {formatted_dataset.features}")
         
         return formatted_dataset
-    
+
     except Exception as e:
         logger.error(f"Error preparing dataset: {str(e)}")
         raise
+
+def freeze_model_parameters(model, layers_to_freeze):
+    """
+    Freezes specific layers or parts of the model.
+
+    Args:
+        model: The LLaMA model.
+        layers_to_freeze: A list of layer names or indices to freeze.
+    """
+    for name, param in model.named_parameters():
+        if any(layer in name for layer in layers_to_freeze):
+            param.requires_grad = False
+            logger.info(f"Froze parameter: {name}")
+        else:
+            param.requires_grad = True
+            logger.info(f"Trainable parameter: {name}")
 
 def main():
     # Parse arguments
@@ -228,12 +253,27 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(
         model_args.model_name_or_path,
         cache_dir=model_args.model_cache_dir,
-        torch_dtype=torch.float16,
+        torch_dtype=torch.bfloat16,
         # device_map="auto",
         use_cache=False,  # Disable KV cache
         low_cpu_mem_usage=True,  # Add this line
         trust_remote_code=True
     )
+    layers_to_freeze = [[f"model.layers.{l}.self_attn.q_proj.weight",
+                     f"model.layers.{l}.self_attn.k_proj.weight",
+                     f"model.layers.{l}.self_attn.v_proj.weight",
+                     f"model.layers.{l}.self_attn.o_proj.weight",
+                     f"model.layers.{l}.mlp.gate_proj.weight",
+                     f"model.layers.{l}.mlp.up_proj.weight",
+                     f"model.layers.{l}.mlp.down_proj.weight",
+                     f"model.layers.{l}.input_layernorm.weight",
+                     f"model.layers.{l}.post_attention_layernorm.weight"
+                     ] for l in range(0, 10)]
+
+    # other_params_to_freeze = ['model.embed_tokens.weight']  # Convert to a list
+    other_params_to_freeze = []
+    params_to_freeze = [param for layer in layers_to_freeze for param in layer] + other_params_to_freeze
+    freeze_model_parameters(model, params_to_freeze)
     model.gradient_checkpointing_enable() # https://huggingface.co/docs/transformers/main/deepspeed?zero-config=ZeRO-1
 
     # Load and prepare dataset
@@ -244,19 +284,29 @@ def main():
     
     train_dataset = prepare_dataset(raw_dataset["train"])
     eval_dataset = None
-    if "validation" in raw_dataset:
-        eval_dataset = prepare_dataset(raw_dataset["validation"])
 
     # ARGUEMENTS
     training_args.remove_unused_columns = False
-    training_args.deepspeed = "ds1.json"
     training_args.offload_optimizer = False
     training_args.loss_type = 'sigmoid'
-    training_args.max_prompt_length = 228 # 97% of data prompts leq this
-    training_args.max_completion_length = 1024 - 228
-    training_args.max_length = 1024 # GPT2 max length
+    training_args.max_prompt_length = 100
+    training_args.max_completion_length = 100
+    training_args.max_length = 200
+    training_args.logging_steps = 1
+    training_args.beta = 0.1
+    training_args.num_train_epochs = 1
 
-    
+    # DEEPSPEED OVERWRITES
+    training_args.learning_rate=1e-06
+    training_args.per_device_train_batch_size = 1
+    training_args.gradient_accumulation_steps = 16
+    # training_args.train_batch_size = 8
+    training_args.max_grad_norm = 0.7
+    training_args.weight_decay=0.01
+
+
+
+
     
     # Initialize DPO Trainer with timing callback
     timing_callback = TimingCallback()
@@ -283,9 +333,9 @@ def main():
         dpo_trainer.save_metrics("train", train_result.metrics)
         dpo_trainer.save_state()
 
-        logger.info(f"Training completed. Model saved to {final_model_path}")
+        logger.info(f"[{training_args.local_rank}] Training completed. Model saved to {final_model_path}")
     else:
-        logger.info("Skipping saving as this process is not rank 0.")
+        logger.info(f"[{training_args.local_rank}] Skipping saving as this process is not rank 0.")
 
 
 if __name__ == "__main__":
