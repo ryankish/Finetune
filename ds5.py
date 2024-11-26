@@ -1,5 +1,6 @@
 import sys
 import os
+import json
 import torch
 import logging
 import time
@@ -17,6 +18,9 @@ torch.cuda.empty_cache()
 os.environ["DEEPSPEED_LOG_LEVEL"] = "info"
 os.environ["DEEPSPEED_LOG_LEVEL_STDOUT"] = "info"
 
+
+
+
 # Configure base directory and logging
 BASE_DIR = "../resources/"
 
@@ -29,6 +33,21 @@ def setup_experiment_directory(experiment_name):
     os.makedirs(experiment_dir, exist_ok=True)
     return experiment_dir
 
+def save_training_args_to_json(training_args, output_dir):
+    args_dict = vars(training_args)
+    def serialize(obj):
+        try:
+            json.dumps(obj)
+            return obj
+        except TypeError:
+            return str(obj)
+
+    serializable_args = {key: serialize(value) for key, value in args_dict.items()}
+    output_path = os.path.join(output_dir, "training_args.json")
+    with open(output_path, "w") as f:
+        json.dump(serializable_args, f, indent=4)
+    logger.info("Training arguments saved as JSON.")
+    print(f"Training arguments saved to {output_path}")
 
 @dataclass
 class ModelArguments:
@@ -268,13 +287,13 @@ def main():
                      f"model.layers.{l}.mlp.down_proj.weight",
                      f"model.layers.{l}.input_layernorm.weight",
                      f"model.layers.{l}.post_attention_layernorm.weight"
-                     ] for l in range(0, 10)]
+                     ] for l in range(0, 4)]
 
     # other_params_to_freeze = ['model.embed_tokens.weight']  # Convert to a list
     other_params_to_freeze = []
     params_to_freeze = [param for layer in layers_to_freeze for param in layer] + other_params_to_freeze
     freeze_model_parameters(model, params_to_freeze)
-    model.gradient_checkpointing_enable() # https://huggingface.co/docs/transformers/main/deepspeed?zero-config=ZeRO-1
+    # model.gradient_checkpointing_enable() # https://huggingface.co/docs/transformers/main/deepspeed?zero-config=ZeRO-1
 
     # Load and prepare dataset
     raw_dataset = load_dataset(
@@ -282,27 +301,30 @@ def main():
         cache_dir=data_args.dataset_cache_dir
     )
     
-    train_dataset = prepare_dataset(raw_dataset["train"])
+    train_dataset = prepare_dataset(raw_dataset["train"], sample_percentage=0.01)
     eval_dataset = None
+    # if "validation" in raw_dataset:
+    #     eval_dataset = prepare_dataset(raw_dataset["validation"])
 
     # ARGUEMENTS
     training_args.remove_unused_columns = False
     training_args.offload_optimizer = False
     training_args.loss_type = 'sigmoid'
-    training_args.max_prompt_length = 100
-    training_args.max_completion_length = 100
-    training_args.max_length = 200
+    training_args.max_prompt_length = 256
+    training_args.max_length = 1024
+    training_args.max_completion_length = training_args.max_length - training_args.max_prompt_length 
     training_args.logging_steps = 1
     training_args.beta = 0.1
     training_args.num_train_epochs = 1
 
     # DEEPSPEED OVERWRITES
     training_args.learning_rate=1e-04
-    training_args.per_device_train_batch_size = 1
+    training_args.per_device_train_batch_size = 16
     training_args.gradient_accumulation_steps = 16
     # training_args.train_batch_size = 8
     training_args.max_grad_norm = 1.0
     training_args.weight_decay=0.01
+    # training_args.dataset_num_proc = None # try this
     
     # Initialize DPO Trainer with timing callback
     timing_callback = TimingCallback()
@@ -328,6 +350,7 @@ def main():
         dpo_trainer.save_model(final_model_path)
         dpo_trainer.save_metrics("train", train_result.metrics)
         dpo_trainer.save_state()
+        save_training_args_to_json(training_args, training_args.output_dir)
 
         logger.info(f"[{training_args.local_rank}] Training completed. Model saved to {final_model_path}")
     else:

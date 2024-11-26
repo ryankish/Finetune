@@ -1,10 +1,10 @@
 {
     "folders": [
         {
-            "path": "/home/jwy3172/work/Finetune",
+            "path": "/home/ubuntu/Finetune",
         },
         {
-            "path": "/data2/ryan/finetune/",
+            "path": "/home/ubuntu/resources/outputs",
         }
     ],
     "settings": {
