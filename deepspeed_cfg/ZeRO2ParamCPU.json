@@ -1,7 +1,7 @@
 {
     "zero_optimization": {
         "stage": 2,
-        "offload_optimizer": {
+        "offload_param": {
             "device": "cpu",
             "pin_memory": true
         },
@@ -33,6 +33,6 @@
         "module_depth": -1,
         "top_modules": 1,
         "detailed": true,
-        "output_file": "ZeRO2OptCPU.log"
+        "output_file": "ZeRO2ParamCPU.log"
     }
 }

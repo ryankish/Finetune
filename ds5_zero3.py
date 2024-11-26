@@ -275,7 +275,13 @@ def main():
         torch_dtype=torch.bfloat16,
         # device_map="auto",
         use_cache=False,  # Disable KV cache
-        low_cpu_mem_usage=True,  # Add this line
+        # low_cpu_mem_usage=True,  # Add this line
+        trust_remote_code=True
+    )
+    ref_model = AutoModelForCausalLM.from_pretrained(
+        model_args.model_name_or_path,
+        cache_dir=model_args.model_cache_dir,
+        torch_dtype=torch.bfloat16,
         trust_remote_code=True
     )
     layers_to_freeze = [[f"model.layers.{l}.self_attn.q_proj.weight",
@@ -338,7 +344,7 @@ def main():
         tokenizer=tokenizer,
         precompute_ref_log_probs=False,
         callbacks=[timing_callback],
-        ref_model=None,
+        ref_model=ref_model,
     )
 
     # Train the model
