@@ -293,7 +293,7 @@ def main():
     other_params_to_freeze = []
     params_to_freeze = [param for layer in layers_to_freeze for param in layer] + other_params_to_freeze
     freeze_model_parameters(model, params_to_freeze)
-    # model.gradient_checkpointing_enable() # https://huggingface.co/docs/transformers/main/deepspeed?zero-config=ZeRO-1
+    model.gradient_checkpointing_enable() # https://huggingface.co/docs/transformers/main/deepspeed?zero-config=ZeRO-1
 
     # Load and prepare dataset
     raw_dataset = load_dataset(
@@ -301,7 +301,7 @@ def main():
         cache_dir=data_args.dataset_cache_dir
     )
     
-    train_dataset = prepare_dataset(raw_dataset["train"], sample_percentage=0.01)
+    train_dataset = prepare_dataset(raw_dataset["train"], sample_percentage=0.05)
     eval_dataset = None
     # if "validation" in raw_dataset:
     #     eval_dataset = prepare_dataset(raw_dataset["validation"])
@@ -315,10 +315,10 @@ def main():
     training_args.max_completion_length = training_args.max_length - training_args.max_prompt_length 
     training_args.logging_steps = 1
     training_args.beta = 0.1
-    training_args.num_train_epochs = 1
+    training_args.num_train_epochs = 3
 
     # DEEPSPEED OVERWRITES
-    training_args.learning_rate=1e-04
+    training_args.learning_rate=5e-04
     training_args.per_device_train_batch_size = 16
     training_args.gradient_accumulation_steps = 16
     # training_args.train_batch_size = 8
