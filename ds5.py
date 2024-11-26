@@ -301,7 +301,8 @@ def main():
         cache_dir=data_args.dataset_cache_dir
     )
     
-    training_args.data_sample = 0.025
+    # training_args.data_sample = 0.025
+    training_args.data_sample = 0.075
     train_dataset = prepare_dataset(raw_dataset["train"], sample_percentage=training_args.data_sample)
     eval_dataset = None
     # if "validation" in raw_dataset:
@@ -319,11 +320,11 @@ def main():
     training_args.num_train_epochs = 3
 
     # DEEPSPEED OVERWRITES
-    training_args.learning_rate=5e-04
-    training_args.per_device_train_batch_size = 16
+    training_args.learning_rate=5e-03
+    training_args.per_device_train_batch_size = 20
     training_args.gradient_accumulation_steps = 16
     # training_args.train_batch_size = 8
-    training_args.max_grad_norm = 1.0
+    training_args.max_grad_norm = 1.5
     training_args.weight_decay=0.01
     # training_args.dataset_num_proc = None # try this
     
